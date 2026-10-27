@@ -19,27 +19,27 @@ func TestSelectedPopulatePeerBusIDs(t *testing.T) {
 	}{
 		{
 			name:  "maps each peer GPU from a batch response",
-			links: []P2PLink{{GPU: 2}, {GPU: 7}},
+			links: []P2PLink{{GPU: 2, Link: P2PLinkSingleSwitch}, {GPU: 7, Link: TwoNVLINKLinks}},
 			values: []FieldValue_v2{
 				fieldValueV2String(FE_GPU, 7, DCGM_FI_DEV_PCI_BUS_ID, "0000:07:00.0"),
 				fieldValueV2String(FE_GPU, 2, DCGM_FI_DEV_PCI_BUS_ID, "0000:02:00.0"),
 			},
 			want: []P2PLink{
-				{GPU: 2, BusID: "0000:02:00.0"},
-				{GPU: 7, BusID: "0000:07:00.0"},
+				{GPU: 2, BusID: "0000:02:00.0", Link: P2PLinkSingleSwitch},
+				{GPU: 7, BusID: "0000:07:00.0", Link: TwoNVLINKLinks},
 			},
 		},
 		{
 			name:  "drops a missing peer GPU",
-			links: []P2PLink{{GPU: 2}, {GPU: 7}},
+			links: []P2PLink{{GPU: 2, Link: P2PLinkCrossCPU}, {GPU: 7, Link: P2PLinkSameBoard}},
 			values: []FieldValue_v2{
 				fieldValueV2String(FE_GPU, 7, DCGM_FI_DEV_PCI_BUS_ID, "0000:07:00.0"),
 			},
-			want: []P2PLink{{GPU: 7, BusID: "0000:07:00.0"}},
+			want: []P2PLink{{GPU: 7, BusID: "0000:07:00.0", Link: P2PLinkSameBoard}},
 		},
 		{
 			name:  "drops a non-OK field status",
-			links: []P2PLink{{GPU: 1}, {GPU: 32}},
+			links: []P2PLink{{GPU: 1, Link: P2PLinkSameBoard}, {GPU: 32, Link: P2PLinkCrossCPU}},
 			values: []FieldValue_v2{
 				fieldValueV2String(FE_GPU, 1, DCGM_FI_DEV_PCI_BUS_ID, "0000:3B:00.0"),
 				{
@@ -50,7 +50,7 @@ func TestSelectedPopulatePeerBusIDs(t *testing.T) {
 					Status:        -1,
 				},
 			},
-			want: []P2PLink{{GPU: 1, BusID: "0000:3B:00.0"}},
+			want: []P2PLink{{GPU: 1, BusID: "0000:3B:00.0", Link: P2PLinkSameBoard}},
 		},
 	}
 
