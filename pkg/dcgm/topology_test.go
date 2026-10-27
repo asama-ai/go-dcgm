@@ -11,11 +11,10 @@ import (
 
 func TestSelectedPopulatePeerBusIDs(t *testing.T) {
 	tests := []struct {
-		name        string
-		links       []P2PLink
-		values      []FieldValue_v2
-		wantBusIDs  map[uint]string
-		wantErrText string
+		name       string
+		links      []P2PLink
+		values     []FieldValue_v2
+		wantBusIDs map[uint]string
 	}{
 		{
 			name:  "maps each peer GPU from a batch response",
@@ -27,42 +26,39 @@ func TestSelectedPopulatePeerBusIDs(t *testing.T) {
 			wantBusIDs: map[uint]string{2: "0000:02:00.0", 7: "0000:07:00.0"},
 		},
 		{
-			name:        "reports a missing peer GPU",
-			links:       []P2PLink{{GPU: 2}},
-			wantErrText: "peer GPU 2",
+			name:  "drops a missing peer GPU",
+			links: []P2PLink{{GPU: 2}, {GPU: 7}},
+			values: []FieldValue_v2{
+				fieldValueV2String(FE_GPU, 7, DCGM_FI_DEV_PCI_BUS_ID, "0000:07:00.0"),
+			},
+			wantBusIDs: map[uint]string{7: "0000:07:00.0"},
 		},
 		{
-			name:  "reports a non-OK field status",
-			links: []P2PLink{{GPU: 2}},
+			name:  "drops a non-OK field status",
+			links: []P2PLink{{GPU: 1}, {GPU: 32}},
 			values: []FieldValue_v2{
+				fieldValueV2String(FE_GPU, 1, DCGM_FI_DEV_PCI_BUS_ID, "0000:3B:00.0"),
 				{
 					EntityGroupId: FE_GPU,
-					EntityID:      2,
+					EntityID:      32,
 					FieldID:       DCGM_FI_DEV_PCI_BUS_ID,
 					FieldType:     DCGM_FT_STRING,
-					Status:        1,
+					Status:        -1,
 				},
 			},
-			wantErrText: "field status 1",
+			wantBusIDs: map[uint]string{1: "0000:3B:00.0"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := populatePeerBusIDs(tt.links, tt.values)
-			if tt.wantErrText != "" {
-				if err == nil || !strings.Contains(err.Error(), tt.wantErrText) {
-					t.Fatalf("populatePeerBusIDs() error = %v, want text %q", err, tt.wantErrText)
-				}
-				return
+			got := populatePeerBusIDs(tt.links, tt.values)
+			if len(got) != len(tt.wantBusIDs) {
+				t.Fatalf("populatePeerBusIDs() kept %d peers, want %d", len(got), len(tt.wantBusIDs))
 			}
-			if err != nil {
-				t.Fatalf("populatePeerBusIDs() error = %v", err)
-			}
-
-			for i := range tt.links {
-				if got, want := tt.links[i].BusID, tt.wantBusIDs[tt.links[i].GPU]; got != want {
-					t.Errorf("links[%d].BusID = %q, want %q", i, got, want)
+			for i := range got {
+				if busID, ok := tt.wantBusIDs[got[i].GPU]; !ok || got[i].BusID != busID {
+					t.Errorf("kept[%d] = GPU %d bus %q, want %q", i, got[i].GPU, got[i].BusID, tt.wantBusIDs[got[i].GPU])
 				}
 			}
 		})

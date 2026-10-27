@@ -145,26 +145,30 @@ func peerEntities(links []P2PLink) []GroupEntityPair {
 	return entities
 }
 
-func populatePeerBusIDs(links []P2PLink, values []FieldValue_v2) error {
+// populatePeerBusIDs keeps peers whose PCI bus ID was read. A missing or failed
+// peer is dropped so one bad topology entry does not fail the whole GPU.
+func populatePeerBusIDs(links []P2PLink, values []FieldValue_v2) []P2PLink {
 	busIDs := make(map[uint]string, len(values))
 	for _, value := range values {
 		if value.EntityGroupId != FE_GPU || value.FieldID != DCGM_FI_DEV_PCI_BUS_ID {
 			continue
 		}
 		if value.Status != DCGM_ST_OK {
-			return fmt.Errorf("get bus ID for peer GPU %d: field status %d", value.EntityID, value.Status)
+			continue
 		}
 		busIDs[value.EntityID] = value.String()
 	}
 
+	kept := make([]P2PLink, 0, len(links))
 	for i := range links {
 		busID, ok := busIDs[links[i].GPU]
 		if !ok {
-			return fmt.Errorf("get bus ID for peer GPU %d: not returned by DCGM", links[i].GPU)
+			continue
 		}
 		links[i].BusID = busID
+		kept = append(kept, links[i])
 	}
-	return nil
+	return kept
 }
 
 func getDeviceTopology(gpuID uint) (links []P2PLink, err error) {
@@ -196,10 +200,7 @@ func getDeviceTopology(gpuID uint) (links []P2PLink, err error) {
 	if err != nil {
 		return nil, fmt.Errorf("get peer GPU bus IDs: %w", err)
 	}
-	if err := populatePeerBusIDs(links, values); err != nil {
-		return nil, err
-	}
-	return
+	return populatePeerBusIDs(links, values), nil
 }
 
 // Link_State represents the state of an NVLINK connection
