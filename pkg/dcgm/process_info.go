@@ -96,60 +96,63 @@ func WatchPidFieldsEx(updateFreq, maxKeepAge time.Duration, maxKeepSamples int, 
 	return watchPidFields(updateFreq, maxKeepAge, maxKeepSamples, gpus...)
 }
 
-type watchPidFieldsFunc func(GroupHandle, time.Duration, time.Duration, int) error
-
 func watchPidFields(updateFreq, maxKeepAge time.Duration, maxKeepSamples int, gpus ...uint) (groupId GroupHandle, err error) {
-	return watchPidFieldsWithWatcher(watchPidFieldsForGroup, UpdateAllFields, updateFreq, maxKeepAge, maxKeepSamples, gpus...)
+	return watchPidFieldsWithOps(cgoAdapter{}, updateFreq, maxKeepAge, maxKeepSamples, gpus...)
 }
 
-func watchPidFieldsWithWatcher(watch watchPidFieldsFunc, update func() error, updateFreq, maxKeepAge time.Duration, maxKeepSamples int, gpus ...uint) (groupId GroupHandle, err error) {
+// watchPidFieldsWithOps creates and refreshes PID watches, destroying the GPU group on failure.
+func watchPidFieldsWithOps(api pidWatchOps, updateFreq, maxKeepAge time.Duration, maxKeepSamples int, gpus ...uint) (groupId GroupHandle, err error) {
 	groupName := fmt.Sprintf("watchPids%d", rand.Uint64())
-	group, err := CreateGroup(groupName)
+	group, err := api.createGroup(groupName, false)
 	if err != nil {
 		return
 	}
 	defer func() {
 		if err != nil {
-			_ = DestroyGroup(group)
+			_ = api.destroyGroup(group)
 		}
 	}()
 
 	numGpus := len(gpus)
 
 	if numGpus == 0 {
-		gpus, err = getSupportedDevices()
+		gpus, err = api.getSupportedDevices()
 		if err != nil {
 			return
 		}
 	}
 
 	for _, gpu := range gpus {
-		err = AddToGroup(group, gpu)
+		err = api.addToGroup(group, gpu)
 		if err != nil {
 			return
 		}
 	}
 
-	err = watch(group, updateFreq, maxKeepAge, maxKeepSamples)
+	err = api.watchPidFieldsNative(group, updateFreq, maxKeepAge, maxKeepSamples)
 	if err != nil {
 		return groupId, err
 	}
-	err = update()
+	err = api.updateAllFields()
 	if err != nil {
 		return groupId, err
 	}
 	return group, nil
 }
 
-func watchPidFieldsForGroup(group GroupHandle, updateFreq, maxKeepAge time.Duration, maxKeepSamples int) error {
+// watchPidFieldsNative starts DCGM PID watches, converting updateFreq to microseconds
+// and maxKeepAge to seconds.
+func (cgoAdapter) watchPidFieldsNative(group GroupHandle, updateFreq, maxKeepAge time.Duration, maxKeepSamples int) error {
 	result := C.dcgmWatchPidFields(handle.handle, group.handle, C.longlong(updateFreq.Microseconds()), C.double(maxKeepAge.Seconds()), C.int(maxKeepSamples))
 
 	if err := errorString(result); err != nil {
-		return &Error{msg: C.GoString(C.errorString(result)), Code: result}
+		return &Error{msg: dcgmErrorText(result), Code: result}
 	}
 	return nil
 }
 
+// getProcessInfo asks DCGM for one process, looks up its operating-system name,
+// and converts the per-GPU response into Go values.
 func getProcessInfo(groupID GroupHandle, pid uint) (processInfo []ProcessInfo, err error) {
 	var pidInfo C.dcgmPidInfo_t
 	pidInfo.version = makeVersion2(unsafe.Sizeof(pidInfo))
@@ -158,7 +161,7 @@ func getProcessInfo(groupID GroupHandle, pid uint) (processInfo []ProcessInfo, e
 	result := C.dcgmGetPidInfo(handle.handle, groupID.handle, &pidInfo)
 
 	if err = errorString(result); err != nil {
-		return processInfo, &Error{msg: C.GoString(C.errorString(result)), Code: result}
+		return processInfo, &Error{msg: dcgmErrorText(result), Code: result}
 	}
 
 	name, err := processName(pid)
@@ -166,9 +169,20 @@ func getProcessInfo(groupID GroupHandle, pid uint) (processInfo []ProcessInfo, e
 		return processInfo, fmt.Errorf("error getting process name: %s", err)
 	}
 
-	processInfo = make([]ProcessInfo, pidInfo.numGpus)
+	return processInfoFromResponse(&pidInfo, name)
+}
 
-	for i := 0; i < int(pidInfo.numGpus); i++ {
+// processInfoFromResponse validates a native process response and copies each
+// GPU's utilization, health, and error data into Go-owned ProcessInfo values.
+func processInfoFromResponse(pidInfo *C.dcgmPidInfo_t, name string) ([]ProcessInfo, error) {
+	gpuCount := int(pidInfo.numGpus)
+	maxGPUCount := len(pidInfo.gpus)
+	if gpuCount < 0 || gpuCount > maxGPUCount {
+		return nil, fmt.Errorf("process info response contains %d GPUs, expected between 0 and %d", gpuCount, maxGPUCount)
+	}
+
+	processInfo := make([]ProcessInfo, gpuCount)
+	for i := 0; i < gpuCount; i++ {
 		var energy uint64
 		e := *uint64Ptr(pidInfo.gpus[i].energyConsumed)
 		if !IsInt64Blank(int64(e)) {
@@ -220,6 +234,15 @@ func getProcessInfo(groupID GroupHandle, pid uint) (processInfo []ProcessInfo, e
 		}
 
 		numErrs := int(pidInfo.gpus[i].numXidCriticalErrors)
+		maxXIDCount := len(pidInfo.gpus[i].xidCriticalErrorsTs)
+		if numErrs < 0 || numErrs > maxXIDCount {
+			return nil, fmt.Errorf(
+				"process info response for GPU index %d contains %d XID errors, expected between 0 and %d",
+				i,
+				numErrs,
+				maxXIDCount,
+			)
+		}
 		ts := make([]uint64, numErrs)
 		for j := 0; j < numErrs; j++ {
 			ts[j] = uint64(pidInfo.gpus[i].xidCriticalErrorsTs[j])
@@ -240,9 +263,11 @@ func getProcessInfo(groupID GroupHandle, pid uint) (processInfo []ProcessInfo, e
 		processInfo[i].Violations = violations
 		processInfo[i].XIDErrors = xidErrs
 	}
-	return
+	return processInfo, nil
 }
 
+// processName reads a process name from Linux procfs. A process that exits
+// before the lookup is treated as missing and returns an empty name.
 func processName(pid uint) (string, error) {
 	f := fmt.Sprintf("/proc/%d/comm", pid)
 	b, err := os.ReadFile(f)

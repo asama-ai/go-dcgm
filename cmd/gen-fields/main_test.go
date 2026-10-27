@@ -70,6 +70,71 @@ func TestParseHeader_IntegerDefines(t *testing.T) {
 	}
 }
 
+func TestGeneratedFieldCommentDocumentsNVLinkScopes(t *testing.T) {
+	comment := generatedFieldComment("DCGM_FI_PROF_NVLINK_TX_BYTES", "ignored")
+	if !strings.Contains(comment, "aggregate") || !strings.Contains(comment, "DCGM_FE_LINK") {
+		t.Fatalf("NVLink field comment = %q, want GPU and link semantics", comment)
+	}
+}
+
+func TestPreserveLegacyFieldNames(t *testing.T) {
+	fields, aliases := preserveLegacyFieldNames([]Field{
+		{Name: "DCGM_FI_DEV_GPU_UTIL", LookupName: "DCGM_FI_DEV_GPU_UTIL", ID: 203},
+		{Name: "DCGM_FI_DEV_GPU_UTIL_RATIO", LookupName: "DCGM_FI_DEV_GPU_UTIL_RATIO", ID: 1613, Comment: "Use DCGM_FI_DEV_GPU_UTIL_RATIO."},
+	}, map[string]int{
+		"DCGM_FI_DEV_GPU_UTIL_RATIO": 203,
+	})
+
+	if got, want := fields[1].Name, "DCGM_FI_DEV_GPU_UTIL_RATIO_V2"; got != want {
+		t.Fatalf("renamed field = %q, want %q", got, want)
+	}
+	if got, want := fields[1].LookupName, "DCGM_FI_DEV_GPU_UTIL_RATIO"; got != want {
+		t.Fatalf("field lookup name = %q, want %q", got, want)
+	}
+	if !strings.Contains(fields[1].Comment, "DCGM_FI_DEV_GPU_UTIL_RATIO_V2") {
+		t.Fatalf("renamed field comment does not name its replacement: %q", fields[1].Comment)
+	}
+	if len(aliases) != 1 {
+		t.Fatalf("compatibility aliases = %d, want 1", len(aliases))
+	}
+	if got, want := aliases[0], (DeprecatedFieldAlias{
+		Name:   "DCGM_FI_DEV_GPU_UTIL_RATIO",
+		Target: "DCGM_FI_DEV_GPU_UTIL",
+		ID:     203,
+	}); got != want {
+		t.Fatalf("compatibility alias = %+v, want %+v", got, want)
+	}
+}
+
+func TestPreserveLegacyFieldNames_ResolvesAliasTargetsAfterRenames(t *testing.T) {
+	fields, aliases := preserveLegacyFieldNames([]Field{
+		{Name: "DCGM_FI_DEV_FIRST", ID: 100},
+		{Name: "DCGM_FI_DEV_SECOND", ID: 200},
+	}, map[string]int{
+		"DCGM_FI_DEV_FIRST":  200,
+		"DCGM_FI_DEV_SECOND": 100,
+	})
+
+	if got, want := fields[0].Name, "DCGM_FI_DEV_FIRST_V2"; got != want {
+		t.Fatalf("first renamed field = %q, want %q", got, want)
+	}
+	if got, want := fields[1].Name, "DCGM_FI_DEV_SECOND_V2"; got != want {
+		t.Fatalf("second renamed field = %q, want %q", got, want)
+	}
+	wantAliases := []DeprecatedFieldAlias{
+		{Name: "DCGM_FI_DEV_FIRST", Target: "DCGM_FI_DEV_SECOND_V2", ID: 200},
+		{Name: "DCGM_FI_DEV_SECOND", Target: "DCGM_FI_DEV_FIRST_V2", ID: 100},
+	}
+	if len(aliases) != len(wantAliases) {
+		t.Fatalf("compatibility aliases = %d, want %d", len(aliases), len(wantAliases))
+	}
+	for i, want := range wantAliases {
+		if got := aliases[i]; got != want {
+			t.Fatalf("compatibility alias %d = %+v, want %+v", i, got, want)
+		}
+	}
+}
+
 // Alias inside #ifdef DCGM_DEPRECATED is recorded.
 func TestParseHeader_AliasInsideDeprecatedBlock_Accepted(t *testing.T) {
 	path := writeHeader(t, `
@@ -444,6 +509,24 @@ dcgm_xid_errors,230
 	}
 }
 
+func TestReadLegacyFieldsCSV_PreservesGPUUtilCompatibilityNames(t *testing.T) {
+	path := writeLegacyCSV(t, `name,id
+DCGM_FI_DEV_GPU_UTIL,203
+DCGM_FI_DEV_GPU_UTIL_RATIO,203
+`)
+
+	legacyFields, err := readLegacyFieldsCSV(path)
+	if err != nil {
+		t.Fatalf("readLegacyFieldsCSV: %v", err)
+	}
+	if legacyFields["DCGM_FI_DEV_GPU_UTIL"] != 203 {
+		t.Errorf("DCGM_FI_DEV_GPU_UTIL = %d, want 203", legacyFields["DCGM_FI_DEV_GPU_UTIL"])
+	}
+	if legacyFields["DCGM_FI_DEV_GPU_UTIL_RATIO"] != 203 {
+		t.Errorf("DCGM_FI_DEV_GPU_UTIL_RATIO = %d, want 203", legacyFields["DCGM_FI_DEV_GPU_UTIL_RATIO"])
+	}
+}
+
 func TestReadLegacyFieldsCSV_InvalidRows(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -456,8 +539,13 @@ func TestReadLegacyFieldsCSV_InvalidRows(t *testing.T) {
 			want:     "header",
 		},
 		{
-			name:     "uppercase name",
-			contents: "name,id\nDCGM_FI_DEV_GPU_TEMP,150\n",
+			name:     "non DCGM uppercase name",
+			contents: "name,id\nGPU_TEMP,150\n",
+			want:     "must be lowercase",
+		},
+		{
+			name:     "mixed case DCGM field constant",
+			contents: "name,id\nDCGM_FI_gpu_util,150\n",
 			want:     "must be lowercase",
 		},
 		{
@@ -729,5 +817,86 @@ dcgm_gpu_temp,150
 	// legacyDCGMFields curated lowercase entry.
 	if !strings.Contains(got, `"dcgm_gpu_temp": 150`) {
 		t.Errorf("curated lowercase entry not preserved:\n%s", got)
+	}
+}
+
+func TestRunFailurePathsAndDeprecatedAlias(t *testing.T) {
+	if code := run([]string{"-unknown"}, &bytes.Buffer{}, &bytes.Buffer{}); code == 0 {
+		t.Fatal("unknown flag succeeded")
+	}
+	if code := run(nil, &bytes.Buffer{}, &bytes.Buffer{}); code == 0 {
+		t.Fatal("missing arguments succeeded")
+	}
+	if code := run([]string{"missing.h", "output.go"}, &bytes.Buffer{}, &bytes.Buffer{}); code == 0 {
+		t.Fatal("missing header succeeded")
+	}
+
+	missingTarget := writeHeader(t, `
+#define DCGM_DEPRECATED
+#ifdef DCGM_DEPRECATED
+#define DCGM_FI_DEV_OLD DCGM_FI_DEV_MISSING
+#endif
+`)
+	legacy := writeLegacyCSV(t, "name,id\n")
+	if code := run([]string{"--legacy-fields", legacy, missingTarget, filepath.Join(t.TempDir(), "output.go")}, &bytes.Buffer{}, &bytes.Buffer{}); code == 0 {
+		t.Fatal("missing alias target succeeded")
+	}
+
+	header := writeHeader(t, `
+#define DCGM_FI_DEV_CANONICAL 42
+// Deprecated: use DCGM_FI_DEV_CANONICAL.
+#define DCGM_FI_DEV_OLD DCGM_FI_DEV_CANONICAL
+`)
+	outputDir := t.TempDir()
+	if code := run([]string{"--legacy-fields", legacy, header, outputDir}, &bytes.Buffer{}, &bytes.Buffer{}); code == 0 {
+		t.Fatal("directory output path succeeded")
+	}
+
+	output := filepath.Join(t.TempDir(), "output.go")
+	if code := run([]string{"--legacy-fields", legacy, header, output}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("deprecated alias run returned %d", code)
+	}
+	generated, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(generated), `"DCGM_FI_DEV_OLD": 42`) {
+		t.Fatalf("deprecated alias missing from output:\n%s", generated)
+	}
+}
+
+func TestResolveDeprecatedFieldAliasesSortsByIDThenName(t *testing.T) {
+	got, err := resolveDeprecatedFieldAliases(
+		[]Field{{Name: "TARGET_TWO", ID: 2}, {Name: "TARGET_ONE", ID: 1}},
+		map[string]string{"Z_ALIAS": "TARGET_ONE", "A_ALIAS": "TARGET_ONE", "OTHER": "TARGET_TWO"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"A_ALIAS", "Z_ALIAS", "OTHER"}
+	for i := range want {
+		if got[i].Name != want[i] {
+			t.Fatalf("alias order = %+v", got)
+		}
+	}
+}
+
+func TestReadLegacyFieldsCSVAdditionalErrors(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		contents string
+	}{
+		{name: "empty", contents: ""},
+		{name: "malformed row", contents: "name,id\n\"unterminated,1\n"},
+		{name: "too many columns", contents: "name,id\na,1,extra\n"},
+		{name: "empty name", contents: "name,id\n,1\n"},
+		{name: "empty id", contents: "name,id\na,\n"},
+		{name: "negative id", contents: "name,id\na,-1\n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := readLegacyFieldsCSV(writeLegacyCSV(t, tt.contents)); err == nil {
+				t.Fatal("expected error")
+			}
+		})
 	}
 }

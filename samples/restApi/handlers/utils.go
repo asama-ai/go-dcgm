@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -14,8 +15,9 @@ import (
 )
 
 const (
-	base    = 10
-	bitsize = 32
+	base                       = 10
+	bitsize                    = 32
+	internalServerErrorMessage = "internal server error"
 
 	// DeviceInfo is the template for formatting device information output
 	deviceInfo = `Driver Version         : {{.Identifiers.DriverVersion}}
@@ -110,6 +112,11 @@ func logRequestError(req *http.Request, err error) {
 	}
 }
 
+func writeInternalError(resp http.ResponseWriter, req *http.Request, err error) {
+	logRequestError(req, err)
+	http.Error(resp, internalServerErrorMessage, http.StatusInternalServerError)
+}
+
 func logRequestStatus(req *http.Request, status int) {
 	logRequestMessage(req, http.StatusText(status))
 }
@@ -135,6 +142,9 @@ func logRequestMessage(req *http.Request, message string) {
 // Returns math.MaxUint32 if the conversion fails
 func getId(resp http.ResponseWriter, req *http.Request, key string) uint {
 	id, err := strconv.ParseUint(key, base, bitsize)
+	if err == nil && id == math.MaxUint32 {
+		err = fmt.Errorf("invalid ID %q", key)
+	}
 	if err != nil {
 		http.Error(resp, err.Error(), http.StatusBadRequest)
 		logRequestError(req, err)
@@ -157,48 +167,37 @@ func getIdByUuid(resp http.ResponseWriter, req *http.Request, key string) uint {
 	return id
 }
 
-// isValidId checks if the given GPU ID exists and is valid
-// Returns true if the ID is valid, false otherwise
-func isValidId(id uint, resp http.ResponseWriter, req *http.Request) bool {
-	count, err := dcgm.GetAllDeviceCount()
+func isValidIdWithDeps(id uint, resp http.ResponseWriter, req *http.Request, deps deviceDeps) bool {
+	count, err := deps.getAllDeviceCount()
 	if err != nil {
-		http.Error(resp, err.Error(), http.StatusInternalServerError)
-		logRequestError(req, err)
-
+		writeInternalError(resp, req, err)
 		return false
 	}
 
 	if id >= count {
 		http.NotFound(resp, req)
 		logRequestStatus(req, http.StatusNotFound)
-
 		return false
 	}
 
 	return true
 }
 
-// isDcgmSupported checks if DCGM supports the given GPU
-// Returns true if supported, false otherwise
-func isDcgmSupported(gpuId uint, resp http.ResponseWriter, req *http.Request) bool {
-	gpus, err := dcgm.GetSupportedDevices()
+func isDcgmSupportedWithDeps(gpuID uint, resp http.ResponseWriter, req *http.Request, deps deviceDeps) bool {
+	gpus, err := deps.getSupportedDevices()
 	if err != nil {
-		http.Error(resp, err.Error(), http.StatusInternalServerError)
-		logRequestError(req, err)
-
+		writeInternalError(resp, req, err)
 		return false
 	}
 
 	for _, gpu := range gpus {
-		if gpuId == gpu {
+		if gpuID == gpu {
 			return true
 		}
 	}
 
-	err = fmt.Errorf("error adding gpu %d to group: This gpu is not supported by dcgm", gpuId)
-	http.Error(resp, err.Error(), http.StatusInternalServerError)
-	logRequestError(req, err)
-
+	err = fmt.Errorf("error adding gpu %d to group: This gpu is not supported by dcgm", gpuID)
+	writeInternalError(resp, req, err)
 	return false
 }
 
@@ -208,11 +207,17 @@ func isJson(req *http.Request) bool {
 	return strings.HasSuffix(req.URL.Path, "/json")
 }
 
-// print formats and writes templated text output to the response
+// printer formats and writes templated text output to the response.
 func printer(resp http.ResponseWriter, req *http.Request, stats any, t *template.Template) {
+	// Render first so a template error cannot commit a partial 200 response.
+	var output bytes.Buffer
 	// #nosec G708 -- t is parsed from package-local templates at startup.
-	if err := t.Execute(resp, stats); err != nil {
-		http.Error(resp, err.Error(), http.StatusInternalServerError)
+	if err := t.Execute(&output, stats); err != nil {
+		writeInternalError(resp, req, err)
+		return
+	}
+
+	if _, err := output.WriteTo(resp); err != nil {
 		logRequestError(req, err)
 	}
 }
@@ -222,20 +227,23 @@ func encode(resp http.ResponseWriter, req *http.Request, stats any) {
 	resp.Header().Set("Content-Type", "application/json")
 
 	if err := json.NewEncoder(resp).Encode(stats); err != nil {
-		http.Error(resp, err.Error(), http.StatusInternalServerError)
-		logRequestError(req, err)
+		writeInternalError(resp, req, err)
 	}
 }
 
 // processPrint formats and writes process information to the response
 func processPrint(resp http.ResponseWriter, req *http.Request, pInfo []dcgm.ProcessInfo) {
+	// Render every entry before writing any of them to the response.
+	var output bytes.Buffer
 	for i := range pInfo {
 		// #nosec G708 -- processInfoTemplate is parsed from a package-local template at startup.
-		if err := processInfoTemplate.Execute(resp, pInfo[i]); err != nil {
-			http.Error(resp, err.Error(), http.StatusInternalServerError)
-			logRequestError(req, err)
-
+		if err := processInfoTemplate.Execute(&output, pInfo[i]); err != nil {
+			writeInternalError(resp, req, err)
 			return
 		}
+	}
+
+	if _, err := output.WriteTo(resp); err != nil {
+		logRequestError(req, err)
 	}
 }

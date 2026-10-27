@@ -149,7 +149,8 @@ func peerEntities(links []P2PLink) []GroupEntityPair {
 // peer is dropped so one bad topology entry does not fail the whole GPU.
 func populatePeerBusIDs(links []P2PLink, values []FieldValue_v2) []P2PLink {
 	busIDs := make(map[uint]string, len(values))
-	for _, value := range values {
+	for index := range values {
+		value := &values[index]
 		if value.EntityGroupId != FE_GPU || value.FieldID != DCGM_FI_DEV_PCI_BUS_ID {
 			continue
 		}
@@ -172,6 +173,16 @@ func populatePeerBusIDs(links []P2PLink, values []FieldValue_v2) []P2PLink {
 }
 
 func getDeviceTopology(gpuID uint) (links []P2PLink, err error) {
+	return cgoAdapter{}.getDeviceTopology(gpuID)
+}
+
+// getDeviceTopology reads peer links and adds their bus IDs through the native adapter.
+func (api cgoAdapter) getDeviceTopology(gpuID uint) (links []P2PLink, err error) {
+	return getDeviceTopologyWithOps(api, gpuID)
+}
+
+// readDeviceTopology converts native peer links; bus IDs are populated separately.
+func (cgoAdapter) readDeviceTopology(gpuID uint) (links []P2PLink, err error) {
 	var topology C.dcgmDeviceTopology_v2
 	topology.version = makeVersion2(unsafe.Sizeof(topology))
 
@@ -180,7 +191,7 @@ func getDeviceTopology(gpuID uint) (links []P2PLink, err error) {
 		return links, nil
 	}
 	if result != C.DCGM_ST_OK {
-		return links, &Error{msg: C.GoString(C.errorString(result)), Code: result}
+		return links, &Error{msg: dcgmErrorText(result), Code: result}
 	}
 
 	links = make([]P2PLink, topology.numGpus)
@@ -188,11 +199,20 @@ func getDeviceTopology(gpuID uint) (links []P2PLink, err error) {
 		links[i].GPU = uint(topology.gpuPaths[i].gpuId)
 		links[i].Link = getP2PLink(uint64(topology.gpuPaths[i].path))
 	}
+	return links, nil
+}
+
+// getDeviceTopologyWithOps reads peer GPU links and fills in their PCI bus IDs.
+func getDeviceTopologyWithOps(api topologyOps, gpuID uint) ([]P2PLink, error) {
+	links, err := api.readDeviceTopology(gpuID)
+	if err != nil {
+		return nil, err
+	}
 	if len(links) == 0 {
-		return
+		return links, nil
 	}
 
-	values, err := EntitiesGetLatestValues(
+	values, err := api.entitiesGetLatestValues(
 		peerEntities(links),
 		[]Short{DCGM_FI_DEV_PCI_BUS_ID},
 		DCGM_FV_FLAG_LIVE_DATA,
@@ -239,7 +259,7 @@ func getNvLinkLinkStatus() ([]NvLinkStatus, error) {
 	}
 
 	if result != C.DCGM_ST_OK {
-		return nil, &Error{msg: C.GoString(C.errorString(result)), Code: result}
+		return nil, &Error{msg: dcgmErrorText(result), Code: result}
 	}
 
 	links := make([]NvLinkStatus, linkStatus.numGpus*C.DCGM_NVLINK_MAX_LINKS_PER_GPU+linkStatus.numNvSwitches*C.DCGM_NVLINK_MAX_LINKS_PER_NVSWITCH)

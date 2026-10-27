@@ -68,47 +68,44 @@ This directory contains test versions of all the DCGM samples, reimplemented usi
 ### Run All Tests
 
 ```bash
-go test ./tests/... -v
+task test:integration
 ```
 
-### Run Specific Test Files
+### Run Focused Tests
 
 ```bash
-# Run device information tests
-go test ./tests/deviceinfo_test.go -v
-
-# Run monitoring tests
-go test ./tests/dmon_test.go -v
-
-# Run diagnostic tests
-go test ./tests/diag_test.go -v
+task test:integration -- --test_filter=TestDeviceInfo
+task test:integration -- --test_filter=TestDmon
+task test:integration -- --test_filter=TestDiag
 ```
 
 ### Run Tests with Different Modes
 
 ```bash
-# Run only quick tests (skip long-running tests)
-go test ./tests/... -v -short
+# Run prerequisite-free unit tests
+task test
 
-# Run tests with timeout
-go test ./tests/... -v -timeout 5m
+# Run integration tests with a five-minute timeout
+task test:integration -- --test_timeout=300
 ```
 
 ### Run Specific Test Functions
 
 ```bash
 # Run specific test function
-go test ./tests/deviceinfo_test.go -v -run TestDeviceInfo
+task test:integration -- --test_filter=TestDeviceInfo
 
 # Run all tests matching a pattern
-go test ./tests/... -v -run "TestDevice.*"
+task test:integration -- --test_filter='TestDevice.*'
 ```
 
 ## Test Features
 
 ### Adaptive Testing
 
-- Tests automatically skip when no GPUs are available
+- Integration and race tasks fail when a GPU is unavailable.
+  `task test:gpu:prereqs` checks that embedded DCGM starts and discovers a
+  physical GPU before either suite runs.
 - Different behavior for single vs. multi-GPU systems
 - Graceful handling of permission-restricted operations
 
@@ -137,7 +134,7 @@ go test ./tests/... -v -run "TestDevice.*"
 - NVIDIA GPU(s) with DCGM support
 - NVIDIA drivers installed
 - DCGM libraries available
-- Go 1.26+ for testing framework features
+- The repository's selected Go 1.27.2 toolchain
 
 ### Dependencies
 
@@ -189,40 +186,40 @@ These tests are designed to integrate well with continuous integration systems:
 - Use standard Go testing patterns
 - Provide detailed logging for troubleshooting
 - Support timeout and cancellation
-- Can run with or without actual GPU hardware (with appropriate skipping)
+- Run GPU tests on a qualified GPU/DCGM system; the tasks fail without one
 
 ### Example GitHub Actions Integration
 
 ```yaml
 - name: Run DCGM Tests
-  run: |
-    go test ./tests/... -v -timeout 10m
-  continue-on-error: true  # Optional: allow failure if no GPU available
+  run: task test:integration -- --test_timeout=600
 ```
+
+`task test:integration` checks that embedded DCGM starts and discovers a
+physical GPU. A missing GPU or broken DCGM runtime fails the task.
 
 ## Troubleshooting
 
 ### Common Issues
 
-1. **No GPUs Found** - Tests will skip automatically
+1. **No GPUs Found** - Integration and race tasks fail; run them on a
+   qualified GPU/DCGM system
 2. **Permission Denied** - Some tests require root privileges
 3. **DCGM Not Available** - Ensure DCGM libraries are installed
 4. **Timeout Issues** - Increase test timeout for slow systems
 
 ### Debug Information
 
-All tests provide verbose logging when run with `-v` flag:
+Request complete Bazel test output when debugging:
 
 ```bash
-go test ./tests/deviceinfo_test.go -v
+task test:integration -- --test_output=all --test_filter=TestDeviceInfo
 ```
 
-### Environment Variables
+### Bazel Options
 
-Tests respect standard Go testing environment variables:
-
-- `GO_TEST_TIMEOUT_SCALE` - Scale test timeouts
-- `DCGM_TESTING_MODE` - Custom testing configurations (if implemented)
+Focused Bazel options can be passed after `--`, including `--test_filter`,
+`--test_timeout`, and `--test_output`.
 
 ## Contributing
 
@@ -230,6 +227,7 @@ When adding new tests:
 
 1. Follow the existing naming pattern (`*_test.go`)
 2. Include comprehensive documentation
-3. Add appropriate test skipping for missing hardware
+3. Keep the GPU preflight failure for missing hardware; skip only tests for
+   capabilities that are optional on an otherwise qualified system
 4. Include both positive and negative test cases
 5. Update this README with new test descriptions
