@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -177,7 +178,10 @@ func TestSelectedPopulatePeerBusIDs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, populatePeerBusIDs(tt.links, tt.values))
+			got := populatePeerBusIDs(tt.links, tt.values)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("populatePeerBusIDs() = %#v, want %#v", got, tt.want)
+			}
 		})
 	}
 }
