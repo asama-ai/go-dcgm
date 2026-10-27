@@ -133,10 +133,10 @@ func TestGetDeviceTopologyWithOps(t *testing.T) {
 
 func TestSelectedPopulatePeerBusIDs(t *testing.T) {
 	tests := []struct {
-		name       string
-		links      []P2PLink
-		values     []FieldValue_v2
-		wantBusIDs map[uint]string
+		name   string
+		links  []P2PLink
+		values []FieldValue_v2
+		want   []P2PLink
 	}{
 		{
 			name:  "maps each peer GPU from a batch response",
@@ -145,7 +145,10 @@ func TestSelectedPopulatePeerBusIDs(t *testing.T) {
 				fieldValueV2String(FE_GPU, 7, DCGM_FI_DEV_PCI_BUS_ID, "0000:07:00.0"),
 				fieldValueV2String(FE_GPU, 2, DCGM_FI_DEV_PCI_BUS_ID, "0000:02:00.0"),
 			},
-			wantBusIDs: map[uint]string{2: "0000:02:00.0", 7: "0000:07:00.0"},
+			want: []P2PLink{
+				{GPU: 2, BusID: "0000:02:00.0"},
+				{GPU: 7, BusID: "0000:07:00.0"},
+			},
 		},
 		{
 			name:  "drops a missing peer GPU",
@@ -153,7 +156,7 @@ func TestSelectedPopulatePeerBusIDs(t *testing.T) {
 			values: []FieldValue_v2{
 				fieldValueV2String(FE_GPU, 7, DCGM_FI_DEV_PCI_BUS_ID, "0000:07:00.0"),
 			},
-			wantBusIDs: map[uint]string{7: "0000:07:00.0"},
+			want: []P2PLink{{GPU: 7, BusID: "0000:07:00.0"}},
 		},
 		{
 			name:  "drops a non-OK field status",
@@ -168,21 +171,13 @@ func TestSelectedPopulatePeerBusIDs(t *testing.T) {
 					Status:        -1,
 				},
 			},
-			wantBusIDs: map[uint]string{1: "0000:3B:00.0"},
+			want: []P2PLink{{GPU: 1, BusID: "0000:3B:00.0"}},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := populatePeerBusIDs(tt.links, tt.values)
-			if len(got) != len(tt.wantBusIDs) {
-				t.Fatalf("populatePeerBusIDs() kept %d peers, want %d", len(got), len(tt.wantBusIDs))
-			}
-			for i := range got {
-				if busID, ok := tt.wantBusIDs[got[i].GPU]; !ok || got[i].BusID != busID {
-					t.Errorf("kept[%d] = GPU %d bus %q, want %q", i, got[i].GPU, got[i].BusID, tt.wantBusIDs[got[i].GPU])
-				}
-			}
+			require.Equal(t, tt.want, populatePeerBusIDs(tt.links, tt.values))
 		})
 	}
 }
